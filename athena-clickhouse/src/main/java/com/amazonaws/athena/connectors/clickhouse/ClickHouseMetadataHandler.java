@@ -39,6 +39,7 @@ import com.amazonaws.athena.connectors.jdbc.connection.GenericJdbcConnectionFact
 import com.amazonaws.athena.connectors.jdbc.connection.JdbcConnectionFactory;
 import com.amazonaws.athena.connectors.jdbc.manager.JDBCUtil;
 import com.amazonaws.athena.connectors.mysql.MySqlMetadataHandler;
+import com.amazonaws.athena.connectors.mysql.MySqlMuxCompositeHandler;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableSet;
 import org.apache.arrow.vector.complex.reader.FieldReader;
@@ -135,27 +136,36 @@ public class ClickHouseMetadataHandler
             final BlockAllocator blockAllocator, final GetSplitsRequest getSplitsRequest)
     {
         LOGGER.debug("{}: Catalog {}, table {}", getSplitsRequest.getQueryId(), getSplitsRequest.getTableName().getSchemaName(), getSplitsRequest.getTableName().getTableName());
+        //QPT
+        if (getSplitsRequest.getConstraints().isQueryPassThrough()) {
+            LOGGER.info("QPT Split Requested");
+            return setupQueryPassthroughSplit(getSplitsRequest);
+        }
+
+        // DEFAULT
         int partitionContd = decodeContinuationToken(getSplitsRequest);
         Set<Split> splits = new HashSet<>();
         Block partitions = getSplitsRequest.getPartitions();
 
-        // TODO consider splitting further depending on #rows or data size. Could use Hash key for splitting if no partitions.
-        for (int curPartition = partitionContd; curPartition < partitions.getRowCount(); curPartition++) {
-            FieldReader locationReader = partitions.getFieldReader(BLOCK_PARTITION_COLUMN_NAME);
-            locationReader.setPosition(curPartition);
+        if (partitions != null) {
+            // TODO consider splitting further depending on #rows or data size. Could use Hash key for splitting if no partitions.
+            for (int curPartition = partitionContd; curPartition < partitions.getRowCount(); curPartition++) {
+                FieldReader locationReader = partitions.getFieldReader(BLOCK_PARTITION_COLUMN_NAME);
+                locationReader.setPosition(curPartition);
 
-            SpillLocation spillLocation = makeSpillLocation(getSplitsRequest);
+                SpillLocation spillLocation = makeSpillLocation(getSplitsRequest);
 
-            LOGGER.debug("{}: Input partition is {}", getSplitsRequest.getQueryId(), locationReader.readText());
+                LOGGER.debug("{}: Input partition is {}", getSplitsRequest.getQueryId(), locationReader.readText());
 
-            Split.Builder splitBuilder = Split.newBuilder(spillLocation, makeEncryptionKey())
-                    .add(BLOCK_PARTITION_COLUMN_NAME, String.valueOf(locationReader.readText()));
+                Split.Builder splitBuilder = Split.newBuilder(spillLocation, makeEncryptionKey())
+                        .add(BLOCK_PARTITION_COLUMN_NAME, String.valueOf(locationReader.readText()));
 
-            splits.add(splitBuilder.build());
+                splits.add(splitBuilder.build());
 
-            if (splits.size() >= MAX_SPLITS_PER_REQUEST) {
-                //We exceeded the number of split we want to return in a single request, return and provide a continuation token.
-                return new GetSplitsResponse(getSplitsRequest.getCatalogName(), splits, encodeContinuationToken(curPartition + 1));
+                if (splits.size() >= MAX_SPLITS_PER_REQUEST) {
+                    //We exceeded the number of split we want to return in a single request, return and provide a continuation token.
+                    return new GetSplitsResponse(getSplitsRequest.getCatalogName(), splits, encodeContinuationToken(curPartition + 1));
+                }
             }
         }
 
